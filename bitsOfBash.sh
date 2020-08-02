@@ -1,9 +1,9 @@
 #!/bin/bash
 #------------------------------------------------------------------------------------------
-#   Last update: June_09_2020_2200
+#   Last update: August_02_2020_1447
 #   Description -   This script aims to provide the user with a modular structure for 
 #                   creating interactive bash scripts. Instead of having several scripts, 
-#                   simply create a function using the "bonesMalone" function as your guide. 
+#                   simply create a function using the "_bonesMalone" function as your guide. 
 #                   Once the function is complete, add an entry to the menu or submenu of 
 #                   your choice so that the option can be presented to the user. 
 #                   This script has samples of making menus using whiptail and dialog.
@@ -11,6 +11,7 @@
 #   "Everything is code." - A. Russo
 #   "Who looks outside dreams; who looks inside awakes." - Dr. Carl Jung
 #   "Today will be better." - K. Miletic
+#   "The sweet ain't the sweet without the sour." - R. Murphy
 #   "A ship in harbor is safe, but that is not what ships are built for." - John A. Shedd
 #------------------------------------------------------------------------------------------
 
@@ -31,7 +32,7 @@
 #   -e          |   Sets the working environment. Useful when determining options 
 #               |   such as network adapter name or package manager.    
 #------------------------------------------------------------------------------------------
-#   -q          |   Runs the quickConfig function then exits the script. 
+#   -q          |   Runs the _quickConfig function then exits the script. 
 #------------------------------------------------------------------------------------------
 #   -s          |   Sets the working user and environment with predefined values.
 #------------------------------------------------------------------------------------------
@@ -39,256 +40,352 @@
 #------------------------------------------------------------------------------------------
 
 #------------------------------ < Global Variables >-----------------------------
-workingENV=""
-workingUSER=""
-workingHOME=""
-debugSwitch=0
-bypassRootSWITCH=0
+set -o errexit
+set -o pipefail
+#set -o nounset
+#set -o xtrace
 
-termHeight=$(tput lines)
-termWidth=$(tput cols)
-linesToShow=10 
 
-dataArray=()
-menuActionLoopCTL=0
-funcMenuLoopCTL=0
-funcActionLoopCTL=0
-outputLOG="log_bitsOfBash.txt"
-tempFileDir="/tmp/bitsOfBash"
+__dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" #Script directory.
+__file="${__dir}/$(basename "${BASH_SOURCE[0]}")" #Script name with file extension.
+__base="$(basename ${__file} .sh)" #Script name without file extension.
+__root=$__dir #Root folder.
+__activeUser=""
+__activeHome=""
+__activeENV=""
+__activeDomain=""
+__terminalHeight=$(tput lines)
+__terminalWidth=$(tput cols)
+__terminalLines=15
+__outputLOG="$__dir/log_BitsOfBash.txt"
+__data=()
+__isDebug=0
+__debugBanner=""
+__exitToMain=""
+__isSuperUser="false"
+__sslRoot="/etc/ssl"
+__sslCertificateDir="$__sslRoot/$__activeDomain"
+__tempDirectory="/tmp/bitsOfBash"
+__ipDATA=""
 #------------------------------------------------------------------------------------------
 
-__main(){
-    timeStamp -s __main
-
-    scriptSetup
-
-    #Infinite loop for the main menu.
+_main(){
+    _logStamp -s _main
+    _setupScript
+    
     while true;
     do
-        menuAction=$(whiptail --title "Main Menu" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
+        __menuOption=$(whiptail --title "Main Menu $__debugBanner" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
         "Desktop" "Desktop config options" OFF \
         "Server" "Server config options" OFF \
         "NVPN" "Install NordVPN" OFF \
-        "SSH" "Configure SSH Server on VM or desktop." OFF 3>&1 1>&2 2>&3)
-        menuActionExitStatus=$?
-
-        if [ ${#menuAction} = 0 ] || [ $menuActionExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction close
+        "SSH" "Configure SSH Server on VM or desktop." OFF 3>&1 1>&2 2>&3) || {
+            echo "*WARNING* Main menu option not selected." | _log
+        }
+        
+        if [ ${#__menuOption} = 0 ]; then 
+            _exit close
         else
-            echo "User selected: $menuAction" |& tee -a $workingHOME/.$outputLOG
-            menuActionLoopCTL=0
-            while [ $menuActionLoopCTL -eq 0 ]
-            do
-                case $menuAction in
-                    Desktop) desktopMenu ;;
-                    Server) serverMenu ;;
-                    NVPN) installNordVPN ;;
-                    SSH) installSSHSERVER ;;
-                esac
-            done
+            echo "User selected: $__menuOption" | _log
+            case $__menuOption in
+                Desktop) _cfgDesktop ;;
+                Server) _cfgServer ;;
+                NVPN) _cfgNordVPN ;;
+                SSH) _cfgSSH ;;
+            esac
         fi
-    done  
-    
-    timeStamp -e __main  
+    done    
 }
 
-function debugMethod(){
+_debug(){
 #------------------------------------------------------------------------------------------
 #   Description -   Creates a pause in execution to check the output of pervious commands.     
 #------------------------------------------------------------------------------------------
-    timeStamp -s debugMethod
-    echo "-- DEBUG MODE --" |& tee -a $workingHOME/.$outputLOG
-    echo "-- PRESS ENTER TO CONTINUE --" |& tee -a $workingHOME/.$outputLOG
-    read debugPause
-    timeStamp -e debugMethod
+    _logStamp -s _debug
+    echo "-- DEBUG MODE --\n-- PRESS ENTER TO CONTINUE --" | _log; read __debugPause
+    _logStamp -e _debug
 }
 
-function chkSwitches(){
+_log(){
+#------------------------------------------------------------------------------------------
+#   Description -   Wites the output of a comand to the specified log file.     
+#------------------------------------------------------------------------------------------
+    while read __input
+    do 
+        __time=`date "+%Y-%m-%d %H:%M:%S"`
+        touch $__outputLOG; chown $__activeUser:$__activeUser $__outputLOG
+        echo $__time": $__input" |& tee -a $__outputLOG
+    done
+}
+
+_scriptSwitches(){ 
 #------------------------------------------------------------------------------------------
 #   Description -   Checks the values passed into the script by the user.
 #                   This will check for a valid flag then process the value that 
 #                   follows the flag or set the value for a global variable.
 #
-#   Issues/ToDo      -   No support yet for validating the input.
+#   Issues/ToDo -   No support yet for validating the input.
 #------------------------------------------------------------------------------------------
-    mkdir -p $tempFileDir
+    mkdir -p $__tempDirectory
 
-    local swithcVal
+    local __swithcVal
     local OPTIND
     local OPTARG
-    while getopts e:u:bdqs swithcVal
+    while getopts e:u:bdqs __swithcVal
     do
-        case $swithcVal in
-            b) bypassRootSWITCH=1 ;;
-            d) debugSwitch=1 ;;
-            e) workingENV=${OPTARG} ;;
-            q) quickConfig; exit 0 ;;
-            s) workingUSER="root";workingENV="ADMIN" ;;
-            u) workingUSER=${OPTARG} ;;
+        case $__swithcVal in
+            b) __isSuperUser="true" ;;
+            d)  
+                __isDebug=1;
+                __debugBanner="*DEBUG-MODE*"; echo "+ $__debugBanner +" | _log
+            ;;
+            e) __activeENV=${OPTARG} ;;
+            q) _quickConfig; exit 0 ;;
+            s) __activeUser="root"; __activeENV="ADMIN" ;;
+            u) __activeUser=${OPTARG} ;;
             *) echo "script usage: $(basename $0) [-e Environment] [-u User] [-d Debug] [-b Bypass root]" ; exit 1 ;;   
         esac
     done
 }
 
-function scriptSetup(){
+_exit(){
+#------------------------------------------------------------------------------------------
+#   Description -   Manages exiting from functions, menus and the script itself. 
+#                   Presents a prompt to the user when needed.
+#------------------------------------------------------------------------------------------
+    __exitToMain=false
+    case $1 in
+        chkMain)
+            if (whiptail --title "*WARNING*" --yesno "No option selected or invalid input. Return to the main menu?" 8 78); then
+                echo "User selected Yes" | _log; __exitToMain=true;
+            else
+                echo "User selected No" #Try again. Other actions could be added here.
+            fi
+        ;;
+        toMain) whiptail --title "Info" --msgbox "Returing to main menu" 8 40 ;;
+        close)
+            if (whiptail --title "*WARNING*" --yesno "Exit the script?" 8 40); then
+                _logStamp -s _main; rm -r $__tempDirectory; clear; echo "*** Arrivederci! ***" | _log; exit 0
+            fi
+        ;;
+        dbg) whiptail --title "-- DEBUG --" --msgbox "DEBUG!!! Returing to main menu" 8 40 ;;
+    esac
+}
+
+_setupScript(){
 #------------------------------------------------------------------------------------------
 #   Description -   Sets global variables and perform checks before presenting main menu.   
 #------------------------------------------------------------------------------------------
     
     #Check if script is being run as privileged user or the bypass is being used.
-    if [ "$bypassRootSWITCH" != "1" ];then
+    if [ "$__isSuperUser" != "true" ]; then
         if [[ $EUID -ne 0 ]]; then
             clear; echo "Please run as a privileged user or use \"-b\" to proceed. The \"-b\" switch is only for actions that does not require elevated privileges."; exit 1
         fi
     fi
 
-    #Check if dialog and whiptail are installed. This is currently the only dependency.
-    isReady=$(which dialog)
-    if [ ${#isReady} = 0 ];then
+    #Check if pkg dialog is installed. This is currently the only dependency.
+    __isReady=$(which dialog) || {
         clear; echo "+++ Installing dependencies +++"; sleep 1; 
-        apt update; apt install dialog whiptail -y
-        echo "+++ Dependencies installed +++";
-    fi    
-
-    if [ "$workingUSER" != "root" ];then
+        sudo apt update && sudo apt install dialog whiptail -y || {
+            echo "*ERROR* Dependencies could not be installed. Exiting..." | _log; exit 0
+        }
+        echo "+++ Dependencies installed +++" | _log
+    }
+    
+    if [ "$__activeUser" != "root" ]; then
         #Check if a working environment has been set
-        if [ ${#workingENV} = 0 ];then
-            setEnvironment
+        if [ ${#__activeENV} = 0 ]; then
+            _cfgEnvironment
         fi
         
         #Check if a user has been set
-        if [ ${#workingUSER} = 0 ];then
-            setUser
+        if [ ${#__activeUser} = 0 ]; then
+            _cfgUser
         fi
-        workingHOME="/home/$workingUSER"
+        __activeHome="/home/$__activeUser"
     else
-        workingHOME="/root"
+        __activeHome="/root"
     fi
-    clear; echo "+++ Loading main menu +++"; sleep 2
+    clear; echo "+++ Loading main menu +++"; sleep 1
 }
 
-function setEnvironment(){
+_cfgEnvironment(){
 #------------------------------------------------------------------------------------------
 #   Description -   Sets the global variable for the working environment of the script.
 #                   This is useful for creating functions that may need changes depending
 #                   on the working environment. Eg. Switching to yum or apt.
 #------------------------------------------------------------------------------------------
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    while true
     do
-        workingENV=$(whiptail --title "Script Environment" --radiolist \
-        "Please select an environment:" $termHeight $termWidth $linesToShow \
-        "PRX" "Proxmox Virtual Machine" OFF \
+        __activeENV=$(whiptail --title "Environment $__debugBanner" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
+        "PRX" "Proxmox Virtual Machine or HV" OFF \
         "XCP-HV" "XCP-NG Hypervisor" OFF \
         "XCP-VM" "XCP-NG Virtual Machine" OFF \
         "VBox" "VirtualBox VM" OFF \
         "AWS" "AWS node." OFF \
         "LINODE" "LINODE node." OFF \
-        "DSK-LAB" "Debian/Ubuntu VM or Desktop Env." OFF 3>&1 1>&2 2>&3)
-        envExitStatus=$?
-
-        echo "User selected: $workingENV" |& tee -a $workingHOME/.$outputLOG
-        if [ ${#workingENV} = 0 ] || [ $envExitStatus != 0 ]; then 
+        "DOCR" "Docker Container" OFF \
+        "DSK-LAB" "Debian/Ubuntu VM or Desktop Env." OFF 3>&1 1>&2 2>&3) || {
+            echo "Environment not selected." | _log;
+        }
+        
+        if [ ${#__activeENV} = 0 ]; then 
             whiptail --title "Error" --msgbox "An environment must be selected." 8 40
-            exitFunction close
+            _exit close
         else
-            funcMenuLoopCTL=1
-            echo "workingENV: $workingENV" |& tee -a $workingHOME/.$outputLOG   
+            echo "Environment selected: $__activeENV"  | _log; break
         fi
     done
 }
 
-function setUser(){
+_cfgUser(){
 #------------------------------------------------------------------------------------------
 #   Description -   Sets the working user for the script. Can be used to 
 #                   set a user quickly based on the environment or have the user
 #                   select a username that currently has a home directory.
 #                   Eg. For AWS the user is hardcoded as "ubuntu"
 #------------------------------------------------------------------------------------------
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    while true
     do
-        case $workingENV in
-            AWS) workingUSER="ubuntu"; funcMenuLoopCTL=1 ;;
+        case $__activeENV in
+            AWS) __activeUser="ubuntu" ;;
             *)
-                srchResultsToArray -u    
+                _search -u    
                 menuMSG="Please select a user:"
-                workingUSER=$(whiptail --title "User Select" --menu "$menuMSG" $termHeight $termWidth $linesToShow "${dataArray[@]}" 3>&1 1>&2 2>&3)
-                workingUSERExitStatus=$?
-                echo "workingUSER: $workingUSER" |& tee -a $workingHOME/.$outputLOG      
-                if [ ${#workingUSER} = 0 ] || [ $workingUSERExitStatus != 0 ]; then 
-                    whiptail --title "Error" --msgbox "A user must be selected." 8 40
-                    exitFunction close
+                __activeUser=$(whiptail --title "User Select" --menu "$menuMSG" $__terminalHeight $__terminalWidth $__terminalLines "${__data[@]}" 3>&1 1>&2 2>&3) || {
+                    echo "*WARNING* User not selected." | _log;
+                }
+                     
+                if [ ${#__activeUser} = 0 ]; then 
+                    whiptail --title "*Error*" --msgbox "A user must be selected." 8 40
+                    _exit close
                 else
-                    funcMenuLoopCTL=1; echo "workingUSER: $workingUSER" |& tee -a $workingHOME/.$outputLOG
+                    echo "User selected: $__activeUser" | _log; break
                 fi
             ;;
         esac 
     done
 }
 
-function srchResultsToArray(){
+_cfgDomain(){
+#------------------------------------------------------------------------------------------
+#   Description -   Sets the working domain name for script activities.  
+#------------------------------------------------------------------------------------------
+    local __swithcVal
+    local OPTIND
+    local OPTARG
+    
+    while getopts :i:j:n: __swithcVal
+    do
+        case $__swithcVal in
+        i) __activeDomain="example1.dev"; return ;;
+        j) __activeDomain="example2.dev"; return ;;
+        n) __activeDomain="example3.dev"; return ;;
+        esac
+    done
+
+    while true
+    do
+        __menuOption=$(whiptail --title "Set Domain" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
+        "S1" "Site: example1.dev" OFF \
+        "S2" "Site: example2.dev" OFF \
+        "S3" "Site: example3.dev" OFF \
+        "ENT" "Enter a domain" OFF 3>&1 1>&2 2>&3) || {
+            echo "*WARNING* Domain not set." | _log
+        }
+        
+        if [ ${#__menuOption} = 0 ]; then 
+            _exit chkMain
+            if [ "$__exitToMain" = "true" ]; then 
+                return;
+            fi
+        else
+            echo "User selected: $__menuOption" | _log
+            case $__menuOption in
+                S1) __activeDomain="example1.dev" ;;
+                S2) __activeDomain="example2.dev" ;;
+                S3) __activeDomain="example3.dev" ;;
+                ENT)
+                    __menuMSG="Please enter a valid domain name. eg. \"example.com\""
+                    __activeDomain=$(whiptail --inputbox "$__menuMSG" $__terminalHeight $__terminalWidth example.com --title "Domain Name" 3>&1 1>&2 2>&3) || {
+                        echo "*WARNING* Domain not set. Setting default to defaultsite.com... Press Enter" | _log;  __activeDomain="defaultsite.com"; read __userWait
+                    }
+                ;;
+            esac
+            
+            __certDir=$(sudo find $__root/SSL_Certificates -type d -iname \*$__activeDomain\*) || {
+                echo "*WARNING* Cert directory not found."
+            }
+
+            if [ ${#__certDir} = 0 ]; then 
+                whiptail --title "*WARNING*" --msgbox "Certs not found in $__root/SSL_Certificates." 8 $__terminalWidth
+            else
+                __sslCertificateDir="$__sslRoot/$__activeDomain"
+                sudo mkdir -p $__sslCertificateDir;
+                sudo cp -r $__root/SSL_Certificates/$__activeDomain/* $__sslCertificateDir
+                ls $__root/SSL_Certificates/$__activeDomain;
+                cd $__sslCertificateDir; cp privkey1.pem privkey1.key; cp cert1.pem cert1.crt; cp fullchain1.pem fullchain1.crt; cp chain1.pem chain1.crt
+                whiptail --title "*WARNING*" --msgbox "Certs copied to $__root/SSL_Certificates." 8 $__terminalWidth
+            fi  
+
+            return;
+        fi       
+    done 
+}
+
+_search(){
 #------------------------------------------------------------------------------------------
 #   Description -   Performs a search based on the flag or values passed in.
 #                   The results will be added to a temp txt file then entered into the
 #                   global data array used for presenting the results as a list to the user.
-#
-#   Issues/ToDo -   No support yet for prompting the user when no files/results are found.
-#                   Whiptail menu will break.
 #------------------------------------------------------------------------------------------
-    rm $tempFileDir/tempDATA.txt;clear;
+    clear
     echo "--------------------------------------------------"
     echo "Searching......"
     echo "--------------------------------------------------"
-    case $1 in
-        -f) find $2 -type f -iname "*.$3" >> $tempFileDir/tempDATA.txt ;;
-        -d) find $2 -type d -iname \*$3\* >> $tempFileDir/tempDATA.txt ;;
-        -s) find $2 -iname \*$3\*.$4 >> $tempFileDir/tempDATA.txt ;;
-        -u) echo "$(ls /home/)" >> $tempFileDir/tempDATA.txt ;;
-        -m)
-            find /home/ -type f -name "*.iso" >> $tempFileDir/tempDATA.txt
-            find /media/$workingUSER -type f -name "*.iso" >> $tempFileDir/tempDATA.txt
-            find /home/ -type f -name "*.img" >> $tempFileDir/tempDATA.txt
-            find /media/$workingUSER -type f -name "*.img" >> $tempFileDir/tempDATA.txt
-        ;;
-    esac
+
+    sudo rm $__tempDirectory/tempDATA.txt || {
+        echo "Temp data file does not exist." | _log;
+    }
+    __data=()
     
-    dataArray=()
-    while IFS= read line
-    do
-        dataArray+=("$line")
-        dataArray+=("")
-    done < $tempFileDir/tempDATA.txt
-}
-
-function exitFunction(){
-#------------------------------------------------------------------------------------------
-#   Description -   Manages exiting from functions, menus and the script itself.
-#------------------------------------------------------------------------------------------
     case $1 in
-        chkMain)
-            if (whiptail --title "Warning" --yesno "No option selected or invalid input. Try again?" 8 78); then
-                echo "User selected Yes" #Try again. Other actions could be added here.
-            else
-                echo "User selected No"; funcMenuLoopCTL=1; menuActionLoopCTL=1 #Return to the main menu
-            fi
+        -f) find $2 -type f -iname "*.$3" >> $__tempDirectory/tempDATA.txt ;;
+        -d) find $2 -type d -iname \*$3\* >> $__tempDirectory/tempDATA.txt ;;
+        -s) find $2 -iname \*$3\*.$4 >> $__tempDirectory/tempDATA.txt ;;
+        -u) echo "$(ls /home/)" >> $__tempDirectory/tempDATA.txt ;;
+        -m)
+            find /home/ -type f -name "*.iso" >> $__tempDirectory/tempDATA.txt
+            find /media/$__activeUser -type f -name "*.iso" >> $__tempDirectory/tempDATA.txt
+            find /home/ -type f -name "*.img" >> $__tempDirectory/tempDATA.txt
+            find /media/$__activeUser -type f -name "*.img" >> $__tempDirectory/tempDATA.txt
         ;;
-        toMain)
-            echo "-- Press Enter to continue --"
-            read userWait; funcMenuLoopCTL=1; menuActionLoopCTL=1
-            whiptail --title "Info" --msgbox "Returing to main menu" 8 40
+        -i)
+            echo "$__ipDATA" >> $__tempDirectory/tempDATA.txt
+            cat $__tempDirectory/tempDATA.txt;
         ;;
-        close)
-            if (whiptail --title "Warning!!!" --yesno "Exit the script?" 8 40); then
-                clear; echo "*** Arrivederci! ***"; exit 0
-            fi
-        ;;
-        dbg) funcMenuLoopCTL=1; whiptail --title "-- DEBUG --" --msgbox "DEBUG!!! Returing to main menu" 8 40 ;;
-    esac
+        -dev) lsblk -o NAME,SIZE -e7 | grep ^sd >> $__tempDirectory/tempDATA.txt ;;
+        -ndev) netstat -i | grep $2 >> $__tempDirectory/tempDATA.txt ;;
+    esac        
+
+    if [[ -s $__tempDirectory/tempDATA.txt ]]; then
+        cat $__tempDirectory/tempDATA.txt | _log;    
+        while IFS= read line
+        do
+            __data+=("$line")
+            __data+=("")
+        done < $__tempDirectory/tempDATA.txt        
+    else
+        __data+=("No_Data_Found")
+        __data+=("")
+    fi
 }
 
-function timeStamp(){
+_logStamp(){
 #------------------------------------------------------------------------------------------
 #   Description -   Adds date and time info to the logs about when a function
 #                   started and ended. Useful for checking previous activities.
@@ -298,70 +395,77 @@ function timeStamp(){
         -e) scriptState="END" ;;
     esac
 
-    echo " " |& tee -a $workingHOME/.$outputLOG
-    echo "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" |& tee -a $workingHOME/.$outputLOG
-    echo "+++ $2 $scriptState: $(date) +++" |& tee -a $workingHOME/.$outputLOG
-    echo "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" |& tee -a $workingHOME/.$outputLOG
-    echo " " |& tee -a $workingHOME/.$outputLOG
+    echo " " | _log
+    echo "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" | _log
+    echo "+++ $2 $scriptState: $(date) +++" | _log
+    echo "++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++" | _log
+    echo " " | _log
 }
 
-function bonesMalone(){
+_bonesMalone(){
 #------------------------------------------------------------------------------------------
 #   Description -   The basic format for the functions used in this script.
 #
-#   Step 1 - Apply starting timestamp
-#   Step 2 - Check for debug. Will exit to the main menu if the debug value is set.
-#   Step 3 - Main body/loop for the function. If the loop is used, it will continue 
-#            until the user selects a valid menu option or choses to exit by selecting cancel.
-#   Step 4 - Check if the function call is a part of a chain of function calls.
-#            (Multiple calls. eg. installNordVPN chFctnCall -> updatesAndPkgs)
-#            This means that the function will not exit to the main menu if another
-#            function is being called after completing the current one. 
-#            Apply the ending timestamp if the function call is not being chained.
+#   Step 1  -   Apply starting _logStamp
+#   Step 2  -   Check for debug. Will exit to the main menu if the debug value is set.
+#   Step 3  -   Main body/loop for the function. If the loop is used, it will continue 
+#               until the user selects a valid menu option or choses to exit by selecting cancel.
+#   Step 4  -   Check if the function call is a part of a chain of function calls.
+#               (Multiple calls. eg. _cfgNordVPN chFctnCall -> _sysConfig)
+#               This means that the function will not exit to the main menu if another
+#               function is being called after completing the current one. 
+#   Step 5  -   Apply the ending _logStamp.
 #------------------------------------------------------------------------------------------
     #Step 1
-    timeStamp -s bonesMalone
+    _logStamp -s _bonesMalone
 
     #Step 2
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    if [ $__isDebug = 1 ]; then
+        _exit dbg; return
     fi    
 
     #Step 3
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    while true
     do
-        menuOption=$(whiptail --title "Skeleton Function" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
+        __menuOption=$(whiptail --title "Skeleton Function" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
         "OP1" "Skeleton Option #1" OFF \
-        "OP2" "Skeleton Option #2" OFF 3>&1 1>&2 2>&3)
-        menuExitStatus=$?
-
-        if [ ${#menuOption} = 0 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction chkMain
+        "OP2" "Skeleton Option #2" OFF 3>&1 1>&2 2>&3) || {
+            echo "Option not selected."
+        }
+        
+        if [ ${#__menuOption} = 0 ]; then 
+            _exit chkMain
+            if [ "$__exitToMain" = "true" ]; then 
+                break
+            fi
         else
-            echo "User selected: $menuOption" |& tee -a $workingHOME/.$outputLOG
-            case $menuOption in
+            echo "__menuOption: $__menuOption" | _log
+            case $__menuOption in
                 OP1)
-                    funcActionLoopCTL=0
-                    while [ $funcActionLoopCTL -eq 0 ]
+                    __funcActionLoopCTL=0
+                    while [ $__funcActionLoopCTL -eq 0 ]
                     do
-                        funcActionLoopCTL=1; funcMenuLoopCTL=1; echo "menuOption: $menuOption"; read debugPause
-                    done
+                        __funcActionLoopCTL=1;  read __debugPause
+                    done                    
                 ;;
                 OP2)
-                    funcMenuLoopCTL=1; echo "menuOption: $menuOption"; read debugPause
+                    read __debugPause
                 ;;
             esac
+
+            #Step 4
+            if [ "$1" != "chFctnCall" ]; then
+                 _exit toMain;
+            fi
+            
+            break
         fi
     done
 
-    #Step 4
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e bonesMalone; exitFunction toMain
-    fi
+    #Step 5
+    _logStamp -e _bonesMalone;
 }
-
 #==============================================================================================================================================================
 # MAIN AND SUPPORT FUNCTIONS -END-
 #==============================================================================================================================================================
@@ -388,74 +492,75 @@ function bonesMalone(){
 # DESKTOP MENU -START- 
 #==============================================================================================================================================================
 
-function desktopMenu(){
+_cfgDesktop(){
 #------------------------------------------------------------------------------------------
-#   Description -   The menu used for the functions related to Desktop or Lab VM's.
+#   Description -   The menu for Desktop and Lab VM config
 #------------------------------------------------------------------------------------------
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    while true
     do
-        menuOption=$(whiptail --title "Desktop/Lab VM Menu" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
-        "ENV-LAUNCH" "Install NordVPN & PKGS" OFF \
-        "PKGS" "System update and package install" OFF 3>&1 1>&2 2>&3)
-        menuExitStatus=$?
-
-        if [ ${#menuOption} = 0 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction chkMain
+        __menuOption=$(whiptail --title "DSK Options $__debugBanner" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
+        "ENV-LAUNCH" "NordVPN & PKGS" OFF \
+        "PKGS" "INST functional packages" OFF 3>&1 1>&2 2>&3) || {
+            echo "*WARNING* Option not selected." | _log
+        }
+        
+        if [ ${#__menuOption} = 0 ]; then 
+            _exit chkMain
+            if [ "$__exitToMain" = "true" ]; then 
+                return
+            fi
         else
-            echo "User selected: $menuOption" |& tee -a $workingHOME/.$outputLOG
-            funcMenuLoopCTL=1
-            case $menuOption in
+            echo "User selected: $__menuOption" | _log
+            case $__menuOption in
                 ENV-LAUNCH)
-                    installNordVPN chFctnCall; updatesAndPkgs;
+                    _cfgNordVPN chFctnCall; _sysConfig;
                 ;;
-                PKGS) updatesAndPkgs ;;
+                PKGS) _sysConfig ;;
             esac
+
+            return
         fi
     done    
 }
 
-function updatesAndPkgs(){
+_sysConfig(){
 #------------------------------------------------------------------------------------------
 #   Description -   Performs system update, installs the specified packages and
 #                   creates a basic script for quick manual updating and clean up.
 #
 #   Issues/ToDo -   Logging snap package installs with the current logging method does not work.
 #------------------------------------------------------------------------------------------
-    timeStamp -s updatesAndPkgs
+    _logStamp -s _sysConfig
     
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    if [ $__isDebug = 1 ]; then
+        _exit dbg; return
     fi
 
-    if (whiptail --title "SNAP Packages" --yesno "Install SNAP packages?" $termHeight $termWidth); then
+    if (whiptail --title "SNAP Packages" --yesno "Install SNAP packages?" $__terminalHeight $__terminalWidth); then
         snap install spotify; snap install vlc; snap install electron-mail; snap install signal-desktop
     fi
 
-    #add-apt-repository ppa:peek-developers/stable
-    apt update && apt upgrade -y |& tee -a $workingHOME/.$outputLOG
-    apt install wireshark -y |& tee -a $workingHOME/.$outputLOG
-    apt install net-tools -y |& tee -a $workingHOME/.$outputLOG
-    apt install exfat-fuse exfat-utils -y |& tee -a $workingHOME/.$outputLOG
-    apt install screenfetch -y |& tee -a $workingHOME/.$outputLOG
-    apt install git -y |& tee -a $workingHOME/.$outputLOG
-    apt install filezilla -y |& tee -a $workingHOME/.$outputLOG
-    apt install dnsutils -y |& tee -a $workingHOME/.$outputLOG
-    apt install htop -y |& tee -a $workingHOME/.$outputLOG
-    apt install zenmap -y |& tee -a $workingHOME/.$outputLOG
-    apt install gparted -y |& tee -a $workingHOME/.$outputLOG
-    apt install mysql-client-core-5.7 -y |& tee -a $workingHOME/.$outputLOG
-    apt install cmatrix -y |& tee -a $workingHOME/.$outputLOG
-    apt install tmux -y |& tee -a $workingHOME/.$outputLOG 
-    apt install mongodb-clients -y |& tee -a $workingHOME/.$outputLOG
-    #apt install peek -y |& tee -a $workingHOME/.$outputLOG
+    apt update && apt upgrade -y | _log
+    apt install net-tools -y | _log
+    apt install exfat-fuse exfat-utils -y | _log
+    apt install screenfetch -y | _log
+    apt install git -y | _log
+    apt install filezilla -y | _log
+    apt install dnsutils -y | _log
+    apt install htop -y | _log
+    apt install gparted -y | _log
+    apt install mysql-client-core-5.7 -y | _log
+    apt install cmatrix -y | _log
+    apt install tmux -y | _log 
+    
+    _writeScript -u
 
-    addScripts -u
-
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e updatesAndPkgs; exitFunction toMain
+    if [ ["$1" != "chFctnCall"] ]; then
+        _exit toMain
     fi
+
+    _logStamp -e _sysConfig
 }
 
 #==============================================================================================================================================================
@@ -484,116 +589,116 @@ function updatesAndPkgs(){
 # SERVER MENU -START- 
 #==============================================================================================================================================================
 
-function serverMenu(){
+_cfgServer(){
 #------------------------------------------------------------------------------------------
 #   Description -   The menu used for the functions related to Server VM's.
 #------------------------------------------------------------------------------------------
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    if [ ${#__activeDomain} = 0 ]; then
+        _cfgDomain
+    fi
+    
+    while true
     do
-        menuOption=$(whiptail --title "Server Menu" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
+        __menuOption=$(whiptail --title "SRVR Options $__debugBanner" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
         "DB" "Install MariaDB, MySQL or Mongo DB." OFF \
         "SMB" "Install SAMBA file server." OFF \
-        "SPLUNK" "Install Splunk Server or Forwarder" OFF \
         "JITSI" "Jitsi meet options." OFF \
         "SET-IP" "VM IP config" OFF \
-        "REG-IP" "Assign registered IP" OFF 3>&1 1>&2 2>&3)
-        menuExitStatus=$?
-
-        if [ ${#menuOption} = 0 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction chkMain
+        "REG-IP" "Assign registered IP" OFF 3>&1 1>&2 2>&3) || {
+            echo "*WARNING* Server option not selected." | _log
+        }
+        
+        if [ ${#__menuOption} = 0 ]; then 
+            _exit chkMain
+            if [ "$__exitToMain" = "true" ]; then 
+                return
+            fi            
         else
-            echo "User selected: $menuOption" |& tee -a $workingHOME/.$outputLOG
-            funcMenuLoopCTL=1
-            case $menuOption in
-                DB) installDatabase ;;
-                SMB) installSMB ;;
-                SPLUNK) installSPLUNK ;;
-                JITSI) installJitsi ;;
-                SET-IP) setVMIP ;;
-                REG-IP) assignRegIP ;;
+            echo "User selected: $__menuOption" | _log
+            
+            case $__menuOption in
+                DB) _cfgDatabase ;;
+                SMB) _cfgSMB ;;
+                JITSI) _cfgJitsiMeet ;;
+                SET-IP) _setIPVM ;;
+                REG-IP) _setIPRegistered ;;
             esac
+            
+            return
         fi        
     done
 }
 
-function installDatabase(){
+_cfgDatabase(){
 #------------------------------------------------------------------------------------------
-#   Description -   Install the selected database on the specified port number.
+#   Description -   Install a database.
 #------------------------------------------------------------------------------------------
-    timeStamp -s installDatabase
+    _logStamp -s _cfgDatabase
     
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    if [ $__isDebug = 1 ]; then
+        _exit dbg; return
     fi 
     
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    while true
     do
-        menuOption=$(whiptail --title "Database Menu" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
+        __menuOption=$(whiptail --title "Database Menu" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
         "MongoDB" "Basic install" OFF \
         "MariaDB" "With utf8 charset" OFF \
-        "MySQL"  "With utf8 charset" OFF 3>&1 1>&2 2>&3)
-        menuExitStatus=$?
-
-        if [ ${#menuOption} = 0 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction chkMain
+        "MySQL"  "With utf8 charset" OFF 3>&1 1>&2 2>&3) || {
+            echo "*WARNING* Option not selected."
+        }
+        
+        if [ ${#__menuOption} = 0 ]; then 
+            _exit chkMain
+            if [ "$__exitToMain" = "true" ]; then 
+                break;
+            fi  
         else
-            echo "User selected: $menuOption" |& tee -a $workingHOME/.$outputLOG
-            funcActionLoopCTL=0
-            while [ $funcActionLoopCTL -eq 0 ]
-            do
-                menuMSG="DB Type selected: $menuOption\nDB port Examples: 27000 for MongoDB, 65101 for MariaDB & MySQL."
-                portNumber=$(whiptail --inputbox "$menuMSG" 8 78 --title "Enter DB Port Number" 3>&1 1>&2 2>&3)
-                portNumberExitStatus=$?
+            echo "User selected: $__menuOption" | _log
+            __menuMSG="DB Type selected: $__menuOption\nDB port Examples: 27000 for MongoDB, 65101 for MariaDB & MySQL."
+            __portNumber=$(whiptail --inputbox "$__menuMSG" 8 78 --title "Enter DB Port Number" 3>&1 1>&2 2>&3) || {
+                echo "*WARNING* No user input." | _log
+            }
+            
+            if [ ${#__portNumber} != 0 ]; then
+                if (whiptail --title "WARNING!!!: Is this correct?" --yesno "DB Type: $__menuOption\nPort: $__portNumber" $__terminalHeight $__terminalWidth); then
+                    echo "__portNumber: $__portNumber" | _log
+                    case $__menuOption in
+                        MariaDB) _cfgMariaDB $__portNumber ;;
+                        MongoDB) _cfgMongoDB $__portNumber ;;
+                        *) _cfgMySQL $__portNumber ;;    
+                    esac
 
-                echo "portNumber: $portNumber" |& tee -a $workingHOME/.$outputLOG
-                
-                if [ ${#portNumber} = 0 ] || [ $portNumberExitStatus != 0 ]; then
-                    if (whiptail --title "Warning" --yesno "Port number was too short or selected cancel. Try again?" 8 78); then
-                        echo "User selected Yes, exit status was $?."
-                    else
-                        echo "User selected No, exit status was $?."; funcActionLoopCTL=1
-                    fi
-                else
-                    if (whiptail --title "WARNING!!!: Is this correct?" --yesno "DB Type: $menuOption\nPort: $portNumber" $termHeight $termWidth); then
-                        funcActionLoopCTL=1; funcMenuLoopCTL=1
+                    sudo ufw allow $__portNumber; sudo ufw enable; sudo ufw status verbose | _log
 
-                        case $menuOption in
-                            MariaDB) installMARIADB $portNumber ;;
-                            MongoDB) installMongoDB $portNumber ;;
-                            *) installMYSQL $portNumber ;;    
-                        esac
+                    whiptail --title "*INFO*" --msgbox "Install Complete. Test the connection:\nmysql -u username -h 192.168.X.XXX -P $__portNumber\nmongo localhost:$__portNumber" 10 $__terminalWidth
 
-                        ufw allow $portNumber; ufw enable; ufw status verbose |& tee -a $workingHOME/.$outputLOG
-                        echo "------------------------------------------------"
-                        echo "Test the connection:"
-                        echo "mysql -u username -h 192.168.X.XXX -P $portNumber "
-                        echo "mongo localhost:$portNumber"
-                        echo "------------------------------------------------"
-                        echo ""
-                        echo "$menuOption action complete."
-                    else
-                        funcActionLoopCTL=1
-                    fi                                                  
-                fi 
-            done
+                fi                                                  
+            fi             
+
+            if [ "$1" != "chFctnCall" ]; then
+                _exit toMain
+            fi
+
+            break;
         fi
     done
 
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e installDatabase; exitFunction toMain
-    fi
+    _logStamp -e _cfgDatabase 
 }
 
-function installMARIADB(){
+_cfgMariaDB(){
 #------------------------------------------------------------------------------------------
-#   Description -   installDatabase support function installing MariaDB
+#   Description -   _cfgDatabase support function installing MariaDB
 #------------------------------------------------------------------------------------------
-    apt install mariadb-server -y|& tee -a $workingHOME/.$outputLOG
-    systemctl stop mysql
+    apt install mariadb-server -y | _log
+    case $__activeENV in
+        DOCR) service mysql stop ;;
+        *) systemctl stop mysql ;;
+    esac 
+
     cp -ip /etc/mysql/mariadb.conf.d/50-server.cnf /etc/mysql/mariadb.conf.d/50-server.cnf_BCKUP$(date "+%F-%T")
     cat > /etc/mysql/mariadb.conf.d/50-server.cnf  <<EOFDBMARIADB
 [server]
@@ -628,15 +733,23 @@ character-set-server  = utf8mb4
 
 [mariadb-10.1]
 EOFDBMARIADB
-    systemctl start mysql; systemctl restart mysql
+
+    case $__activeENV in
+        DOCR) service mysql start; mysql_secure_installation; service mysql restart  ;;
+        *) systemctl start mysql; mysql_secure_installation; systemctl restart mysql ;;
+    esac 
 }
 
-function installMYSQL(){
+_cfgMySQL(){
 #------------------------------------------------------------------------------------------
-#   Description -   installDatabase support function installing MySQL
+#   Description -   _cfgDatabase support function installing MySQL
 #------------------------------------------------------------------------------------------
-    apt install mysql-server -y |& tee -a $workingHOME/.$outputLOG
-    systemctl stop mysql
+    sudo apt install mysql-server -y | _log
+    case $__activeENV in
+        DOCR) service mysql stop ;;
+        *) sudo systemctl stop mysql ;;
+    esac 
+
     cp -ip /etc/mysql/mysql.conf.d/mysqld.cnf /etc/mysql/mysql.conf.d/mysqld.cnf_BCKUP$(date "+%F-%T")
     cat > /etc/mysql/mysql.conf.d/mysqld.cnf <<EOFDBMYSQL
 [mysqld_safe]
@@ -654,7 +767,7 @@ datadir		= /var/lib/mysql
 tmpdir		= /tmp
 lc-messages-dir	= /usr/share/mysql
 skip-external-locking
-#bind-address		= $newAddress
+#bind-address		= 0.0.0.0
 key_buffer_size		= 16M
 max_allowed_packet	= 16M
 thread_stack		= 192K
@@ -666,15 +779,26 @@ log_error = /var/log/mysql/error.log
 expire_logs_days	= 10
 EOFDBMYSQL
 
-    ufw allow $1; ufw enable; ufw status verbose
-    systemctl start mysql; mysql_secure_installation; mysql_ssl_rsa_setup --uid=mysql; systemctl restart mysql;
+    echo "[client]" >> /etc/mysql/my.cnf;
+    echo "default-character-set=utf8" >> /etc/mysql/my.cnf;
+    echo "[mysql]" >> /etc/mysql/my.cnf;
+    echo "default-character-set=utf8" >> /etc/mysql/my.cnf;
+    echo "[mysqld]" >> /etc/mysql/my.cnf;
+    echo "collation-server = utf8_unicode_ci" >> /etc/mysql/my.cnf;
+    echo "init-connect='SET NAMES utf8'" >> /etc/mysql/my.cnf;
+    echo "character-set-server = utf8" >> /etc/mysql/my.cnf;
+    
+    case $__activeENV in
+        DOCR) service mysql start; mysql_secure_installation; mysql_ssl_rsa_setup --uid=mysql; service mysql restart ;;
+        *) systemctl start mysql; mysql_secure_installation; mysql_ssl_rsa_setup --uid=mysql; systemctl restart mysql ;;
+    esac 
 }
 
-function installMongoDB(){
+_cfgMongoDB(){
 #------------------------------------------------------------------------------------------
-#   Description -   installDatabase support function installing MongoDB
+#   Description -   _cfgDatabase support function installing MongoDB
 #------------------------------------------------------------------------------------------
-    apt install mongodb -y |& tee -a $workingHOME/.$outputLOG
+    sudo apt install mongodb -y | _log
     cp /etc/mongodb.conf /etc/mongodb.conf_BCKUP$(date "+%F-%T")
     cat > /etc/mongodb.conf <<EOFDB
 # mongodb.conf
@@ -688,20 +812,24 @@ port = $1
 # Enable journaling, http://www.mongodb.org/display/DOCS/Journaling
 journal=true
 EOFDB
-    systemctl restart mongodb
+    
+    case $__activeENV in
+        DOCR) service mongodb restart ;;
+        *) systemctl restart mongodb ;;
+    esac 
 }
 
-function installSMB(){
+_cfgSMB(){ 
 #------------------------------------------------------------------------------------------
 #   Description -   Install and secure a SAMBA file server.
 #------------------------------------------------------------------------------------------
-    timeStamp -s installSMB
+    _logStamp -s _cfgSMB
     
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    if [ $__isDebug = 1 ];then
+        _exit dbg; return
     fi
     
-    apt install libcups2 samba samba-common cups -y |& tee -a $workingHOME/.$outputLOG
+    sudo apt install libcups2 samba samba-common cups -y | _log
     mv /etc/samba/smb.conf /etc/samba/smb.conf_bak$(date "+%F-%T")
     mkdir -p /home/shared
     chown -R root:users /home/shared
@@ -710,13 +838,13 @@ function installSMB(){
 [global]
 workgroup = WORKGROUP
 server string = Samba Server %v
-netbios name = NETWRKSTRG
+netbios name = SMBX123
 security = user
 map to guest = bad user
 dns proxy = no
 
 [shared]
-comment = LOCAL_SMB_SHARE
+comment = VM_SMB_SHARE
 path = /home/shared
 valid users = @users
 force group = users
@@ -725,418 +853,145 @@ directory mask = 0771
 writable = yes
 EOFSAMBA
     
-    systemctl restart smbd.service
+    systemctl restart smbd
     echo "Creating user smbuser."
     useradd -m -p $(openssl passwd -1 uhytg7hh96gbh7fbzsa#@1DEer4) smbuser
     usermod -a -G users smbuser
     echo "Please set SMB password for smbuser."
     smbpasswd -a smbuser
-    systemctl restart smbd.service
-    ufw allow samba; ufw enable |& tee -a $workingHOME/.$outputLOG
+    systemctl restart smbd
+    ufw allow samba; ufw enable
 
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e installSMB; exitFunction toMain
+    if [ "$1" != "chFctnCall" ]; then
+        _exit toMain
     fi
+
+    _logStamp -e _cfgSMB; 
 }
 
-function installSPLUNK(){
+_cfgJitsiMeet(){
 #------------------------------------------------------------------------------------------
-#   Description -   Install a SPLUNK Server or Forwarder. 
-#   ToDO: Add docker check to enable optimistic about file locking. Warning that files need to be downloaded first.
+#   Description -   Install, stop or remove Jitsi Meet.
 #------------------------------------------------------------------------------------------
-    timeStamp -s installSPLUNK
-    
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    _logStamp -s _cfgJitsiMeet
+
+    if [ $__isDebug = 1 ]; then
+        _exit dbg; return
     fi
 
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
-    do
-        menuOption=$(whiptail --title "SRVR Options" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
-        "SRVR" "SPLUNK Server" OFF \
-        "FWRDR" "SPLUNK Forwarder" OFF \
-        "UPDATE" "Update SPLUNK Forwarder Index" OFF 3>&1 1>&2 2>&3)
-        menuExitStatus=$?
+    __menuOption=$(whiptail --title "Jitsi Meet" --radiolist \
+    "Please select an option:" $__terminalHeight $__terminalWidth $__terminalLines \
+    "FULL" "Install with Turnserver" OFF \
+    "NO-TURN" "Install without Turnserver" OFF \
+    "ST" "Stop Jitsi Meeting Services except Nginx" OFF \
+    "REM" "Remove Jitsi Meet and Nginx" OFF 3>&1 1>&2 2>&3) || {
+        echo "*WARNING* Option not selected."
+    }
 
-        if [ ${#menuOption} = 0 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction chkMain
-        else
-            echo "User selected: $menuOption" 
-            case $menuOption in
-                SRVR)
-                    funcActionLoopCTL=0
-                    while [ $funcActionLoopCTL -eq 0 ]
-                    do
-                        srchResultsToArray -s /home/ splunk deb
-                        menuMSG="Please select one of the following:"
-                        fileSelected=$(whiptail --title "Splunk Server Setup" --menu "$menuMSG" $termHeight $termWidth $linesToShow "${dataArray[@]}" 3>&1 1>&2 2>&3)
-                        fileSelectedExitStatus=$?
-                        echo "fileSelected: $fileSelected" 
+    if [ ${#__menuOption} = 0 ]; then 
+        _exit chkMain
+        if [ "$__exitToMain" = "true" ]; then 
+            return
+        fi 
+    else
+        echo "User selected: $__menuOption" | _log
+        if [ "$__menuOption" = "FULL" ] || [ "$__menuOption" = "NO-TURN" ]; then
+            __workingHostname=$(whiptail --inputbox "Please enter a valid Hostname. eg: meet.example.com" 8 78 --title "Hostname Address" 3>&1 1>&2 2>&3)
+            wget -qO - https://download.jitsi.org/jitsi-key.gpg.key | apt-key add - ;
+            sh -c "echo 'deb https://download.jitsi.org stable/' > /etc/apt/sources.list.d/jitsi-stable.list";
+            apt-get -y update; apt-get -y install apt-transport-https; 
+            
+            __certDir=$(sudo find $__sslRoot -type d -iname \*$__activeDomain\*) || {
+                echo "*WARNING* Cert directory not found." | _log
+            }
 
-                        if [ $fileSelectedExitStatus = 0 ]; then
-                            if (whiptail --title "WARNING!!!: Is this correct?" --yesno "File:$fileSelected\n" $termHeight $termWidth); then
-                                funcMenuLoopCTL=1; funcActionLoopCTL=1
-                                dpkg -i $fileSelected 
-                                ufw allow 8000; ufw allow 9997; ufw status verbose 
-                                /opt/splunk/bin/splunk start --accept-license --answer-yes 
-                                /opt/splunk/bin/splunk enable boot-start 
-                                #OPTIMISTIC_ABOUT_FILE_LOCKING = 1
-                                #/opt/splunk/etc/splunk-launch.conf:
-                                echo "-------------------------"
-                                hostname -I 
-                                echo "-------------------------"
-                            fi
-                        else
-                            funcActionLoopCTL=1   
-                        fi              
-                    done
-                ;;
-                FWRDR)
-                    whiptail --title "Info" --msgbox "Make sure the log index has already been created on the splunk server and linked to the admin account." $termHeight $termWidth
-                    funcActionLoopCTL=0
-                    while [ $funcActionLoopCTL -eq 0 ]
-                    do       
-                        srvrAddress=$(whiptail --inputbox "Please enter a valid address with the port. eg 99.99.99.99:9997" 8 78 --title "Forwarder Address" 3>&1 1>&2 2>&3)
-                        srvrAddressExitStatus=$?
-
-                        if [ $srvrAddressExitStatus = 0 ]; then
-                            indexName=$(whiptail --inputbox "Please enter a the Splunk index name." 8 78 --title "Forwarder Index" 3>&1 1>&2 2>&3)
-                            indexNameExitStatus=$?
-
-                            if [ $indexNameExitStatus = 0 ]; then
-                                echo "srvrAddress: $srvrAddress" 
-                                echo "indexName: $indexName" 
-                                
-                                if [ ${#srvrAddress} = 0 -o $srvrAddressExitStatus != 0 -o ${#indexName} = 0 -o $indexNameExitStatus != 0 ]; then
-                                    if (whiptail --title "Warning" --yesno "Name was too short or selected cancel. Try again?" 8 78); then
-                                        echo "User selected Yes, exit status was $?."
-                                    else
-                                        echo "User selected No, exit status was $?."; funcActionLoopCTL=1
-                                    fi
-                                else
-                                    funcActionLoopCTL=1; funcMenuLoopCTL=1
-
-                                    srchResultsToArray -s /home/ splunk deb
-                                    menuMSG="Please select the Splunk Forwarder .deb file from the following:"
-                                    fileSelected=$(whiptail --title "Splunk Forwarder Setup" --menu "$menuMSG" $termHeight $termWidth $linesToShow "${dataArray[@]}" 3>&1 1>&2 2>&3)
-                                    echo "fileSelected: $fileSelected"  
-                                    
-                                    dpkg -i $fileSelected 
-                                    /opt/splunkforwarder/bin/splunk start --accept-license --answer-yes
-                                    /opt/splunkforwarder/bin/splunk add forward-server $srvrAddress
-                                    /opt/splunkforwarder/bin/splunk enable boot-start
-                                    
-                                    srchResultsToArray -s /home/ splunk tgz                        
-                                    menuMSG="Please select the Splunk the splunk add-on file from the following:"
-                                    fileSelected=$(whiptail --title "Splunk Add-On Setup" --menu "$menuMSG" $termHeight $termWidth $linesToShow "${dataArray[@]}" 3>&1 1>&2 2>&3)
-                                    fileSelectedExitStatus=$?
-                                    echo "fileSelected: $fileSelected" 
-
-                                    tar -zxvf $fileSelected -C $tempFileDir; chown -R splunk:splunk $tempFileDir/Splunk_TA_nix/;
-                                    cp -ipr $tempFileDir/Splunk_TA_nix/ /opt/splunkforwarder/etc/apps/; 
-                                    setSplunkIndex $indexName
-                                    /opt/splunkforwarder/bin/splunk restart
-                                fi 
-                            else
-                                funcActionLoopCTL=1
-                            fi
-                        else
-                            funcActionLoopCTL=1
-                        fi                    
-                    done
-                ;;
-                UPDATE)
-                    funcActionLoopCTL=0
-                    while [ $funcActionLoopCTL -eq 0 ]
-                    do
-                        indexName=$(whiptail --inputbox "Please enter a the Splunk index name." 8 78 --title "Forwarder Index" 3>&1 1>&2 2>&3)
-                        indexNameExitStatus=$?
-                        echo "indexName: $indexName" 
-
-                        if [ ${#indexName} = 0 -o $indexNameExitStatus != 0 ]; then
-                            if (whiptail --title "Warning" --yesno "Name was too short or selected cancel. Try again?" 8 78); then
-                                echo "User selected Yes, exit status was $?."
-                            else
-                                echo "User selected No, exit status was $?."; funcActionLoopCTL=1
-                            fi
-                        else
-                            funcActionLoopCTL=1; funcMenuLoopCTL=1
-
-                            setSplunkIndex $indexName  
-                            /opt/splunkforwarder/bin/splunk restart
-                        fi
-                    done
+            if [ ${#__certDir} = 0 ]; then 
+                whiptail --title "*WARNING*" --msgbox "Certs not found in $__sslRoot. Select the option to generate certs when prompted." 8 40
+            else
+                cd $__sslCertificateDir; 
+                cp privkey1.pem $__sslRoot/$__workingHostname.key || {
+                    echo "*WARNING* Key not found." | _log
+                } 
+                cp fullchain1.pem $__sslRoot/$__workingHostname.crt || {
+                    echo "*WARNING* Cert not found." | _log
+                }
+            fi               
+            
+            case $__menuOption in
+                FULL) apt -y install jitsi-meet ;;
+                NO-TURN)
+                    apt -y install --no-install-recommends jitsi-meet;
+                    wget https://raw.githubusercontent.com/otalk/mod_turncredentials/master/mod_turncredentials.lua
+                    cp mod_turncredentials.lua /usr/lib/prosody/modules/
                 ;;
             esac
+                 
+            whiptail --title "Secure Jitsis Meet" --msgbox "Modify authentication for VirtualHost $__workingHostname\nChange \"authentication = anonymous\" to \"authentication = internal_plain\"" $__terminalHeight $__terminalWidth
+            nano /etc/prosody/conf.d/$__workingHostname.cfg.lua 
+            echo -e "\nVirtualHost \"guest.$__workingHostname\"\n    authentication = \"anonymous\"\n    modules_enabled = {\n     \"turncredentials\";\n    }\n    c2s_require_encryption = false" >> /etc/prosody/conf.d/$__workingHostname.cfg.lua
+            systemctl reload prosody
+            
+            whiptail --title "Secure Jitsis Meet" --msgbox "Modify: anonymousdomain: 'guest.$__workingHostname'" $__terminalHeight $__terminalWidth
+            nano /etc/jitsi/meet/$__workingHostname-config.js
+            echo "--- Set Moderator password ---"; echo "Moderator: moduser@$__workingHostname"
+            prosodyctl adduser moduser@$__workingHostname
+
+            echo -e "#ssl_trusted_certificate $__sslCertificateDir/chain1.pem;" >> /etc/nginx/sites-available/$__workingHostname.conf
+            echo -e "#ssl_dhparam /etc/ssl/dhparam.pem;" >> /etc/nginx/sites-available/$__workingHostname.conf
+            
+            if (whiptail --title "NAT Setting" --yesno "Configure for NAT traversal?" $__terminalHeight $__terminalWidth); then
+                whiptail --title "Config Modification" --msgbox "Comment the line \"org.ice4j.ice.harvest.STUN_MAPPING_HARVESTER_ADDRESSES\" " $__terminalHeight $__terminalWidth
+                nano /etc/jitsi/videobridge/sip-communicator.properties
+                __localIP=$(hostname -I)
+                __publicIP=$(dig +short myip.opendns.com @resolver1.opendns.com) #Issues if you have a VPN connection active.
+                echo "org.ice4j.ice.harvest.NAT_HARVESTER_LOCAL_ADDRESS=$__localIP" >> /etc/jitsi/videobridge/sip-communicator.properties
+                echo "org.ice4j.ice.harvest.NAT_HARVESTER_PUBLIC_ADDRESS=$__publicIP" >> /etc/jitsi/videobridge/sip-communicator.properties
+                echo "org.jitsi.jicofo.auth.URL=XMPP:$__workingHostname" >> /etc/jitsi/jicofo/sip-communicator.properties
+            fi       
+
+            if (whiptail --title "Final Config Check" --yesno "Perform final check?\nThis will open each config file (7 files) related to the Jitsi meet install." $__terminalHeight $__terminalWidth); then
+                nano /etc/jitsi/jicofo/sip-communicator.properties;nano /etc/jitsi/jicofo/config;nano /etc/jitsi/meet/$__workingHostname-config.js;nano /etc/jitsi/videobridge/config;
+                nano /etc/jitsi/videobridge/sip-communicator.properties;nano /etc/nginx/sites-available/$__workingHostname.conf;
+                nano /etc/prosody/conf.avail/$__workingHostname.cfg.lua; nano /etc/nginx/modules-enabled/60-jitsi-meet.conf;
+                if [ "$__menuOption" = "FULL" ]; then
+                    nano /etc/turnserver.conf
+                fi                 
+            fi
+            
+            ufw allow 443; ufw allow in 4443:4446/udp; ufw allow in 10000:20000/udp; ufw enable; ufw status verbose;
+            systemctl reload prosody jicofo jitsi-videobridge2 cotrun nginx; systemctl restart prosody jicofo jitsi-videobridge2 coturn nginx; systemctl status prosody jicofo jitsi-videobridge2 coturn nginx;
         fi
-    done
-
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e installSPLUNK; exitFunction toMain
+        
+        case $__menuOption in
+            ST) systemctl stop prosody jicofo jitsi-videobridge2 cotrun ;;
+            REM) apt purge jitsi* jigasi prosody* coturn* nginx* jicofo* -y; apt autoremove -y; apt clean ;;
+        esac        
     fi
+        
+    if [ "$1" != "chFctnCall" ]; then
+        _exit toMain
+    fi
+
+    _logStamp -e _cfgJitsiMeet
 }
 
-function setSplunkIndex(){
-#------------------------------------------------------------------------------------------
-#   Description -   installSPLUNK support function for setting the 
-#                   Splunk Forwarder index inputs.
-#------------------------------------------------------------------------------------------
-    indexName=$1
-    cat > /opt/splunkforwarder/etc/apps/Splunk_TA_nix/default/inputs.conf <<EOFSPLF
-# Copyright (C) 2019 Splunk Inc. All Rights Reserved.
-[script://./bin/vmstat.sh]
-interval = 60
-sourcetype = vmstat
-source = vmstat
-disabled = 1
-
-[script://./bin/iostat.sh]
-interval = 60
-sourcetype = iostat
-source = iostat
-disabled = 1
-
-[script://./bin/nfsiostat.sh]
-interval = 60
-sourcetype = nfsiostat
-source = nfsiostat
-disabled = 1
-
-[script://./bin/ps.sh]
-interval = 600
-sourcetype = ps
-source = ps
-index = $indexName
-disabled = 0
-
-[script://./bin/top.sh]
-interval = 60
-sourcetype = top
-source = top
-disabled = 1
-
-[script://./bin/netstat.sh]
-interval = 600
-sourcetype = netstat
-source = netstat
-index = $indexName
-disabled = 0
-
-[script://./bin/bandwidth.sh]
-interval = 60
-sourcetype = bandwidth
-source = bandwidth
-disabled = 1
-
-[script://./bin/protocol.sh]
-interval = 60
-sourcetype = protocol
-source = protocol
-disabled = 1
-
-[script://./bin/openPorts.sh]
-interval = 600
-sourcetype = openPorts
-source = openPorts
-index = $indexName
-disabled = 1
-
-[script://./bin/time.sh]
-interval = 21600
-sourcetype = time
-source = time
-disabled = 1
-
-[script://./bin/lsof.sh]
-interval = 600
-sourcetype = lsof
-source = lsof
-disabled = 1
-
-[script://./bin/df.sh]
-interval = 300
-sourcetype = df
-source = df
-disabled = 1
-
-# Shows current user sessions
-[script://./bin/who.sh]
-sourcetype = who
-source = who
-index = $indexName
-interval = 150
-disabled = 0
-
-# Lists users who could login (i.e., they are assigned a login shell)
-[script://./bin/usersWithLoginPrivs.sh]
-sourcetype = usersWithLoginPrivs
-source = usersWithLoginPrivs
-interval = 3600
-disabled = 1
-
-# Shows last login time for users who have ever logged in
-[script://./bin/lastlog.sh]
-sourcetype = lastlog
-source = lastlog
-interval = 3600
-disabled = 0
-
-# Shows stats per link-level Etherner interface (simply, NIC)
-[script://./bin/interfaces.sh]
-sourcetype = interfaces
-source = interfaces
-interval = 60
-disabled = 1
-
-# Shows stats per CPU (useful for SMP machines)
-[script://./bin/cpu.sh]
-sourcetype = cpu
-source = cpu
-interval = 30
-disabled = 1
-
-# This script reads the auditd logs translated with ausearch
-[script://./bin/rlog.sh]
-sourcetype = auditd
-source = auditd
-interval = 60
-disabled = 1
-
-# Run package management tool collect installed packages
-[script://./bin/package.sh]
-sourcetype = package
-source = package
-interval = 3600
-disabled = 0
-
-[script://./bin/hardware.sh]
-sourcetype = hardware
-source = hardware
-interval = 36000
-disabled = 1
-
-[monitor:///Library/Logs]
-disabled = 1
-
-[monitor:///var/log]
-whitelist=(\.log|log$|messages|secure|auth|mesg$|cron$|acpid$|\.out)
-blacklist=(lastlog|anaconda\.syslog)
-index = $indexName
-disabled = 0
-
-[monitor:///var/adm]
-whitelist=(\.log|log$|messages)
-disabled = 1
-
-[monitor:///etc]
-whitelist=(\.conf|\.cfg|config$|\.ini|\.init|\.cf|\.cnf|shrc$|^ifcfg|\.profile|\.rc|\.rules|\.tab|tab$|\.login|policy$)
-disabled = 1
-
-### bash history
-[monitor:///root/.bash_history]
-disabled = false
-sourcetype = bash_history
-index = $indexName
-
-[monitor:///home/*/.bash_history]
-disabled = false
-sourcetype = bash_history
-index = $indexName
-
-
-
-##### Added for ES support
-# Note that because the UNIX app uses a single script to retrieve information
-# from multiple OS flavors, and is intended to run on Universal Forwarders,
-# it is not possible to differentiate between OS flavors by assigning
-# different sourcetypes for each OS flavor (e.g. Linux:SSHDConfig), as was
-# the practice in the older deployment-apps included with ES. Instead,
-# sourcetypes are prefixed with the generic "Unix".
-
-# May require Splunk forwarder to run as root on some platforms.
-[script://./bin/openPortsEnhanced.sh]
-disabled = true
-interval = 3600
-source = Unix:ListeningPorts
-sourcetype = Unix:ListeningPorts
-
-[script://./bin/passwd.sh]
-disabled = true
-interval = 3600
-source = Unix:UserAccounts
-sourcetype = Unix:UserAccounts
-
-# Only applicable to Linux
-[script://./bin/selinuxChecker.sh]
-disabled = true
-interval = 3600
-source = Linux:SELinuxConfig
-sourcetype = Linux:SELinuxConfig
-
-# Currently only supports SunOS, Linux, OSX.
-# May require Splunk forwarder to run as root on some platforms.
-[script://./bin/service.sh]
-disabled = true
-interval = 3600
-source = Unix:Service
-sourcetype = Unix:Service
-
-# Currently only supports SunOS, Linux, OSX.
-# May require Splunk forwarder to run as root on some platforms.
-[script://./bin/sshdChecker.sh]
-disabled = true
-interval = 3600
-source = Unix:SSHDConfig
-sourcetype = Unix:SSHDConfig
-
-# Currently only supports Linux, OSX.
-# May require Splunk forwarder to run as root on some platforms.
-[script://./bin/update.sh]
-disabled = true
-interval = 86400
-source = Unix:Update
-sourcetype = Unix:Update
-
-[script://./bin/uptime.sh]
-disabled = true
-interval = 86400
-source = Unix:Uptime
-sourcetype = Unix:Uptime
-
-[script://./bin/version.sh]
-disabled = true
-interval = 86400
-source = Unix:Version
-sourcetype = Unix:Version
-
-# This script may need to be modified to point to the VSFTPD configuration file.
-[script://./bin/vsftpdChecker.sh]
-disabled = true
-interval = 86400
-source = Unix:VSFTPDConfig
-sourcetype = Unix:VSFTPDConfig
-
-EOFSPLF
-}
-
-function setVMIP(){
+_setIPVM(){
 #------------------------------------------------------------------------------------------
 #   Description -   Sets the IP address of a VM using Netplan.
 #------------------------------------------------------------------------------------------
-    timeStamp -s setVMIP
+    _logStamp -s _setIPVM
     
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    if [ $__isDebug = 1 ];then
+        _exit dbg
+        return
     fi
     
-    newIPAddress=""
-    newGateway=""
-    newDNS=""
-    validInput=0
+    __newIPAddress=""
+    __newGateway=""
+    __newDNS=""
+    __validInput=0
         
-    case $workingENV in
+    case $__activeENV in
         XCP-VM)
             ad1="eth0"
             #ad2="eth1"
@@ -1154,66 +1009,69 @@ function setVMIP(){
         ;;
     esac
     
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    while true
     do
-        adaptOption=$(whiptail --title "Networking" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
+        __adaptOption=$(whiptail --title "Networking" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
         "DHCP" "Reset to DHCP" OFF \
-        "Set-IP" "Set adapter 1 IP address" OFF 3>&1 1>&2 2>&3)
-        adaptOptionExitStatus=$?
+        "Set-IP" "Set adapter 1 IP address" OFF 3>&1 1>&2 2>&3) || {
+            echo "*WARNING* Option not seleced." | _log
+        }
 
-        if [ ${#adaptOption} = 0 ] || [ $adaptOptionExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction chkMain
+        if [ ${#__adaptOption} = 0 ]; then 
+            _exit chkMain
+            if [ "$__exitToMain" = "true" ]; then 
+                break;
+            fi  
         else
-            echo "User selected: $adaptOption" |& tee -a $workingHOME/.$outputLOG
-            if [ "$adaptOption" != "DHCP" ];then
-                formMessage="Current IP:$(hostname -I)\nUser selected: $adaptOption\n\nPlease enter the following details:"
-                menuOption=$(dialog --ok-label "Submit" \
+            echo "User selected: $__adaptOption" | _log
+            if [ "$__adaptOption" != "DHCP" ];then
+                __formMessage="Current IP:$(hostname -I)\nUser selected: $__adaptOption\n\nPlease enter the following details:"
+                __menuOption=$(dialog --ok-label "Submit" \
                     --backtitle "IP Configuration" \
                     --title "Set VM IP Address" \
-                    --form "$formMessage" \
+                    --form "$__formMessage" \
                     15 50 0 \
-                    "IP: (192.168.1.77/24)" 1 1	"$newIPAddress" 	1 23 20 0 \
-                    "Gateway: (192.168.1.7)"    2 1	"$newGateway"  	2 23 20 0 \
-                    "DNS: (1.1.1.1)"    3 1	"$newDNS"  	3 23 20 0 \
-                3>&1 1>&2 2>&3) 
-                menuExitStatus=$?
+                    "IP: (192.168.1.77/24)" 1 1	"$__newIPAddress" 	1 23 20 0 \
+                    "Gateway: (192.168.1.7)"    2 1	"$__newGateway"  	2 23 20 0 \
+                    "DNS: (1.1.1.1)"    3 1	"$__newDNS"  	3 23 20 0 \
+                3>&1 1>&2 2>&3) || {
+                    echo "*WARNING* No user input." | _log; break
+                }
                 
-                echo "$menuOption" >> $tempFileDir/tempDATA.txt
-                srchResultsToArray 
-
-                newIPAddress=${dataArray[0]}
-                newGateway=${dataArray[2]}
-                newDNS=${dataArray[4]}
-
-                if [ ${#newIPAddress} -lt 10 ] || [ ${#newGateway} -lt 7 ] || [ ${#newDNS} -lt 7 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-                    exitFunction chkMain
+                if [ ${#__menuOption} -lt 25 ]; then 
+                    _exit chkMain
+                    if [ "$__exitToMain" = "true" ]; then 
+                        break;
+                    fi 
                 else
+                    __oldIP=$(hostname -I)
+                    __ipDATA=$__menuOption
+                    _search -i
+                    __newIPAddress=${__data[0]}
+                    __newGateway=${__data[2]}
+                    __newDNS=${__data[4]}
+                    
                     #Confirm the input
-                    if (whiptail --title "WARNING!!!: Is this correct?" --yesno "IP: $newIPAddress\nGateway: $newGateway\nDNS: $newDNS" $termHeight $termWidth); then
-                        validInput=1
+                    if (whiptail --title "WARNING!!!: Is this correct?" --yesno "IP: $__newIPAddress\nGateway: $__newGateway\nDNS: $__newDNS" $__terminalHeight $__terminalWidth); then
+                        __validInput=1
                     else
-                        funcMenuLoopCTL=0
+                        break;
                     fi                    
                 fi
             fi
 
             #Apply the settings
-            if [ $validInput -eq 1 ] || [ "$adaptOption" == "DHCP" ];then
-                funcMenuLoopCTL=1
+            if [ $__validInput -eq 1 ] || [ "$__adaptOption" == "DHCP" ];then
                 echo "------------------------------------------------"
                 echo "Applying changes..."
-                cp /etc/netplan/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml_BCKUP$(date "+%F-%T")
+                cp /etc/netplan/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml_BCKUP$(date "+%F-%T") || {
+                    touch /etc/netplan/50-cloud-init.yaml
+                }
                         
-                case $adaptOption in
+                case $__adaptOption in
                     "DHCP")
                         cat > /etc/netplan/50-cloud-init.yaml <<EOFIPDEFAULT
-# This file is generated from information provided by
-# the datasource.  Changes to it will not persist across an instance.
-# To disable cloud-init's network configuration capabilities, write a file
-# /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg with the following:
-# network: {config: disabled}
 network:
     ethernets:
         $ad1:
@@ -1224,65 +1082,89 @@ EOFIPDEFAULT
                     ;;
                     *)
                         cat > /etc/netplan/50-cloud-init.yaml <<EOFIPVPN
-# This file is generated from information provided by
-# the datasource.  Changes to it will not persist across an instance.
-# To disable cloud-init's network configuration capabilities, write a file
-# /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg with the following:
-# network: {config: disabled}
 network:
     ethernets:
         $ad1:
-            addresses: [$newIPAddress]
+            addresses: [$__newIPAddress]
             dhcp4: false
-            gateway4: $newGateway
+            gateway4: $__newGateway
             nameservers:
-                addresses: [$newDNS]
+                addresses: [$__newDNS]
             optional: true
     version: 2    
 EOFIPVPN
                     ;;
                 esac
             
-                netplan --debug generate |& tee -a $workingHOME/.$outputLOG; netplan apply
-                echo "IP address changed. Verify the changes." |& tee -a $workingHOME/.$outputLOG
-                echo " "; cat /etc/netplan/50-cloud-init.yaml
+                    netplan --debug generate | _log || {
+                    echo "*ERROR* Restoring default config" | _log
+                    whiptail --title "*Error*" --msgbox "Invalid input. Default setting will be applied." 8 40
+                    
+                    cat > /etc/netplan/50-cloud-init.yaml <<EOFIPDEFAULT
+network:
+    ethernets:
+        $ad1:
+            dhcp4: true
+            optional: true
+    version: 2    
+EOFIPDEFAULT
+        
+                netplan --debug generate | _log
+                }
+                
+                netplan apply; sleep 3; 
+                
+                if [ "$__adaptOption" != "DHCP" ]; then
+                    echo "Old IP: $__oldIP" | _log
+                    echo "New IP: $__newIPAddress" | _log
+                    echo "New Gateway: $__newGateway" | _log
+                    echo "New DNS: $__newDNS" | _log
+
+                    whiptail --title "*INFO*" --msgbox "Old IP: $__oldIP \
+                    New IP: $__newIPAddress \
+                    New Gateway: $__newGateway \
+                    New DNS: $__newDNS" 10 40
+                else
+                    whiptail --title "*INFO*" --msgbox "DHCP settings restored." 8 40
+                fi
+                
+                break;
             fi
         fi
     done
     
-    hostname -I
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e setVMIP; exitFunction toMain
-    fi
+    _logStamp -e _setIPVM
 }
 
-function assignRegIP(){
+_setIPRegistered(){
 #------------------------------------------------------------------------------------------
 #   Description -   Sets the IP address of a VM from a hardcoded value.
 #------------------------------------------------------------------------------------------
-    timeStamp -s assignRegIP
+    _logStamp -s _setIPRegistered
     
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    if [ $__isDebug = 1 ]; then
+        _exit dbg; return
     fi
 
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    while true
     do
-        menuOption=$(whiptail --title "Set IP" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
+        __menuOption=$(whiptail --title "Set IP" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
         "PROXY" "Local Nginx proxy." OFF \
         "DB" "Database server." OFF \
         "CLOUD" "Nextcloud" OFF \
-        "SMB" "Local SMB" OFF 3>&1 1>&2 2>&3)
-        menuExitStatus=$?
+        "SMB" "Local SMB" OFF 3>&1 1>&2 2>&3) || {
+            echo "*WARNING* No option selected." | _log
+        }
 
-        if [ ${#menuOption} = 0 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction chkMain
+        if [ ${#__menuOption} = 0 ]; then 
+            _exit chkMain
+            if [ "$__exitToMain" = "true" ]; then 
+                break;
+            fi 
         else
-            funcMenuLoopCTL=1
-            echo "User selected: $menuOption" |& tee -a $workingHOME/.$outputLOG
-            case $workingENV in
+            echo "User selected: $__menuOption" | _log
+            case $__activeENV in
                 XCP-VM)
                     ad1="eth0"
                     #ad2="eth1"
@@ -1300,24 +1182,27 @@ function assignRegIP(){
                 ;;
             esac
 
-            cp /etc/netplan/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml_BCKUP$(date "+%F-%T")
-            case $menuOption in
-                PROXY) ipAdd="192.168.1.45/24" ;;
-                DB) ipAdd="192.168.1.46/24" ;;
-                CLOUD) ipAdd="192.168.1.47/24" ;; 
-                SMB) ipAdd="192.168.1.48/24" ;;
-            esac
+            cp /etc/netplan/50-cloud-init.yaml /etc/netplan/50-cloud-init.yaml_BCKUP$(date "+%F-%T") || {
+                touch /etc/netplan/50-cloud-init.yaml
+            }
 
+            case $__menuOption in
+                PROXY) __ipAdd="192.168.1.45/24" ;;
+                DB) __ipAdd="192.168.1.46/24" ;;
+                CLOUD) __ipAdd="192.168.1.47/24" ;; 
+                SMB) __ipAdd="192.168.1.48/24" ;;
+            esac
+            
+            __oldIP=$(hostname -I)
+            echo "Old IP address: $__oldIP" | _log
+            echo "New IP address: $__ipAdd" | _log
+            echo "Interface name: $ad1" | _log
+            
             cat > /etc/netplan/50-cloud-init.yaml <<EOFSETIP
-# This file is generated from information provided by
-# the datasource.  Changes to it will not persist across an instance.
-# To disable cloud-init's network configuration capabilities, write a file
-# /etc/cloud/cloud.cfg.d/99-disable-network-config.cfg with the following:
-# network: {config: disabled}
 network:
     ethernets:
         $ad1:
-            addresses: [$ipAdd]
+            addresses: [$__ipAdd]
             dhcp4: false
             gateway4: 192.168.1.1
             nameservers:
@@ -1325,93 +1210,29 @@ network:
             optional: true
     version: 2    
 EOFSETIP
-            netplan --debug generate |& tee -a $workingHOME/.$outputLOG; netplan apply        
+            netplan --debug generate | _log || {
+            echo "*ERROR* Restoring default config" | _log
+            whiptail --title "*Error*" --msgbox "Invalid input. Default setting will be applied." 8 40
+            
+            cat > /etc/netplan/50-cloud-init.yaml <<EOFIPDEFAULT
+network:
+    ethernets:
+        $ad1:
+            dhcp4: true
+            optional: true
+    version: 2    
+EOFIPDEFAULT
+        
+            netplan --debug generate | _log
+            }            
+            
+            netplan apply; sleep 3        
+            whiptail --title "*INFO*" --msgbox "Old IP address: $__oldIP\nIP address: $__ipAdd\nInterface name: $ad1" 10 40
+            
         fi
     done
 
-    hostname -I
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e assignRegIP; exitFunction toMain
-    fi
-}
-
-function installJitsi(){
-#------------------------------------------------------------------------------------------
-#   Description -   Install, stop or remove Jitsi Meet.
-#------------------------------------------------------------------------------------------
-    timeStamp -s installJitsi
-
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
-    fi
-
-    menuOption=$(whiptail --title "Jitsi Meet" --radiolist \
-    "Please select an option:" $termHeight $termWidth $linesToShow \
-    "FULL" "Install with Turnserver" OFF \
-    "NO-TURN" "Install without Turnserver" OFF \
-    "ST" "Stop Jitsi Meeting Services except Nginx" OFF \
-    "REM" "Remove Jitsi Meet and Nginx" OFF 3>&1 1>&2 2>&3)
-    menuExitStatus=$?
-
-    if [ ${#menuOption} = 0 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-        exitFunction chkMain
-    else
-        echo "User selected: $menuOption" |& tee -a $workingHOME/.$outputLOG
-        if [ "$menuOption" = "FULL" ] || [ "$menuOption" = "NO-TURN" ];then
-            workingHostname=$(whiptail --inputbox "Please enter a valid Hostname. eg: meet.example.com" 8 78 --title "Hostname Address" 3>&1 1>&2 2>&3)
-            wget -qO - https://download.jitsi.org/jitsi-key.gpg.key | apt-key add - ;
-            sh -c "echo 'deb https://download.jitsi.org stable/' > /etc/apt/sources.list.d/jitsi-stable.list";
-            apt-get -y update; apt-get -y install apt-transport-https; 
-
-            case $menuOption in
-                FULL) apt -y install jitsi-meet ;;
-                NO-TURN)
-                    apt -y install --no-install-recommends jitsi-meet;
-                    wget https://raw.githubusercontent.com/otalk/mod_turncredentials/master/mod_turncredentials.lua
-                    cp mod_turncredentials.lua /usr/lib/prosody/modules/
-                ;;
-            esac
-                 
-            whiptail --title "Secure Jitsis Meet" --msgbox "Modify authentication for VirtualHost $workingHostname\nChange \"authentication = anonymous\" to \"authentication = internal_plain\"" $termHeight $termWidth
-            nano /etc/prosody/conf.d/$workingHostname.cfg.lua 
-            echo -e "\nVirtualHost \"guest.$workingHostname\"\n    authentication = \"anonymous\"\n    modules_enabled = {\n     \"turncredentials\";\n    }\n    c2s_require_encryption = false" >> /etc/prosody/conf.d/$workingHostname.cfg.lua
-            systemctl reload prosody
-            
-            whiptail --title "Secure Jitsis Meet" --msgbox "Modify: anonymousdomain: 'guest.meet.example.com'" $termHeight $termWidth
-            nano /etc/jitsi/meet/$workingHostname-config.js
-            echo "--- Set Moderator password ---"; echo "Moderator: moduser@$workingHostname"
-            prosodyctl adduser moduser@$workingHostname
-
-            if (whiptail --title "NAT Setting" --yesno "Configure for NAT traversal?" $termHeight $termWidth); then
-                whiptail --title "Config Modification" --msgbox "Comment the line \"org.ice4j.ice.harvest.STUN_MAPPING_HARVESTER_ADDRESSES\" " $termHeight $termWidth
-                nano /etc/jitsi/videobridge/sip-communicator.properties
-                localIP=$(hostname -I)
-                publicIP=$(dig +short myip.opendns.com @resolver1.opendns.com) #Issues if you have a VPN connection active.
-                echo "org.ice4j.ice.harvest.NAT_HARVESTER_LOCAL_ADDRESS=$localIP" >> /etc/jitsi/videobridge/sip-communicator.properties
-                echo "org.ice4j.ice.harvest.NAT_HARVESTER_PUBLIC_ADDRESS=$publicIP" >> /etc/jitsi/videobridge/sip-communicator.properties
-                echo "org.jitsi.jicofo.auth.URL=XMPP:$workingHostname" >> /etc/jitsi/jicofo/sip-communicator.properties
-            fi       
-
-            if (whiptail --title "Final Config Check" --yesno "Perform final check?\nThis will open each config file (7 files) related to the Jitsi meet install." $termHeight $termWidth); then
-                nano /etc/jitsi/jicofo/sip-communicator.properties;nano /etc/jitsi/jicofo/config;nano /etc/jitsi/meet/$workingHostname-config.js;nano /etc/jitsi/videobridge/config;nano /etc/jitsi/videobridge/sip-communicator.properties;nano /etc/nginx/sites-available/$workingHostname.conf;nano /etc/prosody/conf.avail/$workingHostname.cfg.lua;
-                if [ "$menuOption" = "FULL" ];then
-                    nano /etc/turnserver.conf
-                fi                 
-            fi
-            
-            ufw allow 443; ufw allow in 4443:4446/udp; ufw allow in 10000:20000/udp; ufw enable; ufw status verbose;
-            systemctl reload prosody jicofo jitsi-videobridge2 cotrun nginx; systemctl restart prosody jicofo jitsi-videobridge2 coturn nginx; systemctl status prosody jicofo jitsi-videobridge2 coturn nginx;
-        fi
-        
-        case $menuOption in
-            ST) systemctl stop prosody jicofo jitsi-videobridge2 cotrun ;;
-            REM) apt purge jitsi* jigasi prosody* coturn* nginx* jicofo* -y; apt autoremove -y; apt clean ;;
-        esac        
-    fi
-        
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e installJitsi; exitFunction toMain
-    fi
+    _logStamp -e _setIPRegistered
 }
 #==============================================================================================================================================================
 # SERVER ADMIN -END-
@@ -1439,59 +1260,76 @@ function installJitsi(){
 # GENERAL FUNCTIONS -START-
 #==============================================================================================================================================================
 
-function installSSHSERVER(){
+_cfgSSH(){
 #------------------------------------------------------------------------------------------
 #   Description -   Install SSH server with key access only.
+#   Issues/ToDo -   1. FIX port number passing to copy key
+#                   2. Create a way to check which port SSH is running on.
 #------------------------------------------------------------------------------------------
-    timeStamp -s installSSHSERVER
-
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    _logStamp -s _cfgSSH
+    
+    if [ $__isDebug = 1 ]; then
+        _exit dbg; return
     fi
 
-    funcMenuLoopCTL=0
-    while [ $funcMenuLoopCTL -eq 0 ]
+    while true
     do
-        menuOption=$(whiptail --title "SSH" --radiolist \
-        "Please select one of the following:" $termHeight $termWidth $linesToShow \
-        "Install" "Fresh install of SSH server" OFF \
-        "Add-Key" "Add ssh key to this machine." OFF 3>&1 1>&2 2>&3)
-        menuExitStatus=$?
-
-        if [ ${#menuOption} = 0 ] || [ $menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
-            exitFunction chkMain
+        __menuOption=$(whiptail --title "SSH" --radiolist \
+        "Please select one of the following:" $__terminalHeight $__terminalWidth $__terminalLines \
+        "Install" "Fresh install of SSH server." OFF \
+        "GEN" "Generate SSH key on this host." OFF \
+        "Add-Key" "Add SSH key to this host." OFF 3>&1 1>&2 2>&3) || {
+            echo "*WARNING* Option not selected."
+        }
+        
+        if [ ${#__menuOption} = 0 ]; then 
+            _exit chkMain
+            if [ "$__exitToMain" = "true" ]; then 
+                break;
+            fi 
         else
-            echo "User selected: $menuOption" |& tee -a $workingHOME/.$outputLOG
-            case $menuOption in
+            echo "User selected: $__menuOption" | _log
+            
+            case $__menuOption in
                 Install)
-                    funcMenuLoopCTL=1
-                    case $workingENV in
-                        XCP-HV) yum install -y openssh-server |& tee -a $workingHOME/.$outputLOG ;;
-                        *) apt install openssh-server -y |& tee -a $workingHOME/.$outputLOG ;;
+                    case $__activeENV in
+                        XCP-HV) yum install -y openssh-server | _log ;; 
+                        *) sudo apt install openssh-server -y | _log ;; 
                     esac
-                                        
-                    if (whiptail --title "SSH Key Copy" --yesno "Would you like to copy a key now?" $termHeight $termWidth); then
-                        sshCopyKey
+                    
+                    if (whiptail --title "SSH Key Copy" --yesno "Would you like to copy a key now?" $__terminalHeight $__terminalWidth); then
+                        _copyKeySSH
                     fi
                 ;;
-                Add-Key) funcMenuLoopCTL=1; sshCopyKey ;;
+                Add-Key) _copyKeySSH ;;
+                GEN) 
+                    #ssh-keygen -b 4096 
+                    mkdir -p $__activeHome/.ssh; ssh-keygen -o -a 100 -t ed25519 -f $__activeHome/.ssh/id_ed25519 -C "admin@email.dev";
+                    eval `ssh-agent -s`;ssh-add
+                    chown -R $__activeUser:$__activeUser $__activeHome/.ssh
+                ;;
             esac
+
+            if [ "$1" != "chFctnCall" ]; then
+                _exit toMain
+            fi
+
+            break;
         fi
     done
-    
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e installSSHSERVER; exitFunction toMain
-    fi
+
+    _logStamp -e _cfgSSH
 }
 
-function sshCopyKey(){
+_copyKeySSH(){
 #------------------------------------------------------------------------------------------
-#   Description -   installSSHSERVER support function for setting up the ssh key access.
+#   Description -   Copy SSH Key
 #------------------------------------------------------------------------------------------
-    sshPortNum=2202
+    __sshPortNum=2207
     mv /etc/ssh/sshd_config /etc/ssh/sshd_config_bak$(date "+%F-%T")
     cat > /etc/ssh/sshd_config <<EOFLSSH1VM
-Port $sshPortNum
+#************* $__activeUser $(date "+%F-%T") *************
+Port $__sshPortNum
 ChallengeResponseAuthentication no
 UsePAM yes
 X11Forwarding yes
@@ -1500,26 +1338,29 @@ AcceptEnv LANG LC_*
 Subsystem	sftp	/usr/lib/openssh/sftp-server
 EOFLSSH1VM
     
-    case $workingENV in
-        XCP-HV) systemctl restart sshd; system-config-firewall-tui ;;
+    case $__activeENV in
+        XCP-HV) sudo systemctl restart sshd; sudo system-config-firewall-tui ;;
         *)
-            ufw allow 2202 |& tee -a $workingHOME/.$outputLOG
-            ufw enable |& tee -a $workingHOME/.$outputLOG
-            ufw status verbose |& tee -a $workingHOME/.$outputLOG
-            systemctl restart sshd
+            sudo ufw allow 2207 | _log
+            sudo ufw enable | _log
+            sudo ufw status verbose | _log
+            sudo systemctl restart sshd
         ;;
     esac
 
-menuMSG="Copy your SSH key to this host: $(hostname -I)\n
-Port: $sshPortNum \n
+__menuMSG="Copy your SSH key to this host: $(hostname -I)\n
+Port: $__sshPortNum \n
 IP: $(hostname -I)
-ssh-copy-id $workingUSER@ipAddress -p $sshPortNum\n
-To generate a key on your host use: ssh-keygen -b 4096\n
+ssh-copy-id username@ipAddress -p $__sshPortNum\n
+To generate a key on your host use: ssh-keygen -b 4096 or\n
+ssh-keygen -o -a 100 -t ed25519 -f ~/.ssh/id_ed25519 -C \"your@email.com\"\n
 Press OK when the key has been coppied."
-                
-    whiptail --title "SSH Key Copy" --msgbox --scrolltext "$menuMSG" $termHeight $termWidth
+
+    whiptail --title "SSH Key Copy" --msgbox --scrolltext "$__menuMSG" $__terminalHeight $__terminalWidth
+    
     cat > /etc/ssh/sshd_config <<EOFLSSH2VM
-Port $sshPortNum
+#************* theWolfHimself *************
+Port $__sshPortNum
 PermitRootLogin no
 MaxAuthTries 3
 PubkeyAuthentication yes
@@ -1531,78 +1372,83 @@ ChallengeResponseAuthentication no
 UsePAM no 
 X11Forwarding no 
 PrintMotd no
-ClientAliveInterval 600
+ClientAliveInterval 3600
 ClientAliveCountMax 0
 AcceptEnv LANG LC_*
 Subsystem       sftp    /usr/lib/openssh/sftp-server
 EOFLSSH2VM
-    systemctl restart sshd
+
+    case $__activeENV in
+        XCP-HV) sudo systemctl restart sshd ;;
+        *)
+            sudo systemctl restart sshd
+        ;;
+    esac
 }
 
-function installNordVPN(){
+_cfgNordVPN(){
 #------------------------------------------------------------------------------------------
 #   Description -   Install NordVPN and create a script thats is used for quick connections.
 #------------------------------------------------------------------------------------------
-    timeStamp -s installNordVPN
+    _logStamp -s _cfgNordVPN
 
-    if [ $debugSwitch = 1 ];then
-        exitFunction dbg; return
+    if [ $__isDebug = 1 ]; then
+        _exit dbg; return
     fi
 
-    wget -P $tempFileDir/NordVPN https://repo.nordvpn.com/deb/nordvpn/debian/pool/main/nordvpn-release_1.0.0_all.deb;
-    dpkg -i $tempFileDir/NordVPN/nordvpn-release_1.0.0_all.deb
-    apt update; apt install nordvpn -y
+    sudo apt update; sudo apt install unzip -y;
+    sudo mkdir -p /etc/openvpn
+    wget -P $__tempDirectory/NordVPN https://repo.nordvpn.com/deb/nordvpn/debian/pool/main/nordvpn-release_1.0.0_all.deb;
+    wget -P $__tempDirectory/NordVPN https://downloads.nordcdn.com/configs/archives/servers/ovpn.zip;
+    sudo unzip $__tempDirectory/NordVPN/ovpn.zip -d /etc/openvpn;
+    
+    dpkg -i $__tempDirectory/NordVPN/nordvpn-release_1.0.0_all.deb
+    sudo apt update; sudo apt install nordvpn -y | _log
 
-    if (whiptail --title "NordVPN Login" --yesno "Would you like to login now?" $termHeight $termWidth); then
-        clear; echo "-Login-"; nordvpn login
+    if (whiptail --title "NordVPN Login" --yesno "Would you like to login now?" $__terminalHeight $__terminalWidth); then
+        clear; echo "-Login-"; sudo nordvpn login || {
+            echo "*WARNING*  Login failed."
+        }
     fi
 
-    addScripts -n
+    _writeScript -n
 
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e installNordVPN; exitFunction toMain
+    if [ "$1" != "chFctnCall" ]; then
+        _exit toMain
     fi
+
+    _logStamp -e _cfgNordVPN
 }
 
-function addScripts(){
-    timeStamp -s addScripts
+_writeScript(){
+#------------------------------------------------------------------------------------------
+#   Description -   Create a specific bash alias or script.
+#------------------------------------------------------------------------------------------
+    _logStamp -s _writeScript
     
-    userScriptDIR=$workingHOME/userScripts; mkdir -p $userScriptDIR
-    
-    local swithcVal
+    __userScripts=$__activeHome/userScripts; mkdir -p $__userScripts
+    chown -R $__activeUser:$__activeUser $__userScripts
+
+    local __swithcVal
     local OPTIND
     local OPTARG
 
-    aliasForUpdate="uu"
-    aliasForNordConnect="nv-c"
-    aliasForNordDisconnect="nv-d"
-    aliasForNordStatus="nv-s"
+    __aliasForUpdate="uu"
+    __aliasForNordConnect="nv-c"
+    __aliasForNordDisconnect="nv-d"
+    __aliasForNordStatus="nv-s"
     
-    while getopts un swithcVal
+    while getopts nu __swithcVal
     do
-        case $swithcVal in
-            u)
-                cat > $userScriptDIR/update.sh << EOFUPSH
-#!/bin/bash
-apt update;apt upgrade -y; apt autoremove -y; apt clean;
-EOFUPSH
-                setCheckUpdate=$(grep -c $aliasForUpdate $workingHOME/.bashrc )
-                if [ "$setCheckUpdate" != "1" ];then
-                    echo -e "alias $aliasForUpdate='sudo bash $userScriptDIR/update.sh'" >> $workingHOME/.bashrc
-                    echo "Alias created. Check the .bashrc file in your home directory."
-                else
-                    echo "Alias esists."
-                fi
-                echo "Script update.sh added to $userScriptDIR/"
-            ;;
+        case $__swithcVal in
             n)
-                cat > $userScriptDIR/nord.sh << EOFNORD
+                cat > $__userScripts/nord.sh << EOFNORD
 #!/bin/bash
 #-------- Script Variables ----------
-    termHeight=\$(tput lines)
-    termWidth=\$(tput cols)
-    linesToShow=10
-    funcMenuLoopCTL=0
+    __terminalHeight=\$(tput lines)
+    __terminalWidth=\$(tput cols)
+    __terminalLines=10
+    __funcMenuLoopCTL=0
 #------------------------------------
 
 #---------- Quick Connect/Disconnect -----------
@@ -1618,10 +1464,10 @@ EOFUPSH
 #------------------------------------
 
 #----------- Main Menu --------------
-    while [ \$funcMenuLoopCTL -eq 0 ]
+    while [ \$__funcMenuLoopCTL -eq 0 ]
     do
-        menuOption=\$(whiptail --title "NordVPN Menu" --radiolist \\
-        "Please select one of the following:" \$termHeight \$termWidth \$linesToShow \\
+        __menuOption=\$(whiptail --title "NordVPN Menu" --radiolist \\
+        "Please select one of the following:" \$__terminalHeight \$__terminalWidth \$__terminalLines \\
         "LI" "Login or switch accounts" OFF \\
         "LO" "Logout" OFF \\
         "CA" "Connect to Canada" OFF \\
@@ -1631,18 +1477,18 @@ EOFUPSH
         "DIS" "Disconnect an active connection" OFF 3>&1 1>&2 2>&3)
         menuExitStatus=\$?
 
-        if [ \${#menuOption} = 0 ] || [ \$menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
+        if [ \${#__menuOption} = 0 ] || [ \$menuExitStatus != 0 ]; then #If an option was not selected or the user chose cancel.
             if !(whiptail --title "Warning" --yesno "No option selected. Try again?" 8 78); then
-                funcMenuLoopCTL=0
+                __funcMenuLoopCTL=0
             fi
         else
-            funcMenuLoopCTL=1
+            __funcMenuLoopCTL=1
             clear
-            case \$menuOption in
+            case \$__menuOption in
                 LI) nordvpn logout;nordvpn login ;;
                 LO) nordvpn logout ;;
-                CA) nordvpn connect ca991 ;;
-                US) nordvpn connect us2931 ;;
+                CA) nordvpn connect ca928 ;;
+                US) nordvpn connect us5009 ;;
                 SE) nordvpn connect se384 ;;
                 UK) nordvpn connect uk814 ;;
                 DIS) nordvpn disconnect;;
@@ -1652,38 +1498,52 @@ EOFUPSH
     nordvpn status;
     echo "*** Arrivederci! ***"
 EOFNORD
-                setCheckNord=$(grep -c $aliasForNordConnect $workingHOME/.bashrc )
-                if [ "$setCheckNord" != "1" ];then
-                    echo -e "alias $aliasForNordConnect='sudo bash $userScriptDIR/nord.sh -c'" >> $workingHOME/.bashrc
-                    echo -e "alias $aliasForNordDisconnect='sudo bash $userScriptDIR/nord.sh -d'" >> $workingHOME/.bashrc
-                    echo -e "alias $aliasForNordStatus='sudo bash $userScriptDIR/nord.sh -s'" >> $workingHOME/.bashrc
-                    echo "Alias created. Check the .bashrc file in your home directory."
-                else
-                    echo "Alias already exists."
+                __aliasSet=$(grep -c $__aliasForNordConnect $__activeHome/.bashrc ) || {
+                    echo "*WARNING* Alias not found."
+                }
+
+                if [ "$__aliasSet" == "0" ]; then
+                    echo -e "alias $__aliasForNordConnect='sudo bash $__userScripts/nord.sh -c'" >> $__activeHome/.bashrc
+                    echo -e "alias $__aliasForNordDisconnect='sudo bash $__userScripts/nord.sh -d'" >> $__activeHome/.bashrc
+                    echo -e "alias $__aliasForNordStatus='sudo bash $__userScripts/nord.sh -s'" >> $__activeHome/.bashrc
+                    echo "Script nord.sh added to $__userScripts/" | _log
                 fi
-                
-                echo "Script nord.sh added to $userScriptDIR/"
             ;;
-            *) echo "[CHECK SYNTAX!!!!!!!!] for addScripts" ; exit 1 ;;   
+            u)
+                cat > $__userScripts/update.sh << EOFUPSH
+#!/bin/bash
+apt update;apt upgrade -y; apt autoremove -y; apt clean;
+EOFUPSH
+                __aliasSet=$(grep -c $__aliasForUpdate $__activeHome/.bashrc ) || {
+                    echo "*WARNING* Alias not found."
+                }
+                
+                if [ "$__aliasSet" == "0" ]; then
+                    echo -e "alias $__aliasForUpdate='sudo bash $__userScripts/update.sh'" >> $__activeHome/.bashrc
+                    echo -e "alias byee='sudo bash $__userScripts/update.sh; shutdown -h now'" >> $__activeHome/.bashrc
+                    echo "Script update.sh added to $__userScripts/" | _log
+                fi
+            ;;
+            *) echo "[CHECK SYNTAX!!!!!!!!] for _writeScript" ; exit 1 ;;   
         esac
+
+        chown -R $__activeUser:$__activeUser $__userScripts
     done
     
-    if [ "$1" != "chFctnCall" ];then
-        timeStamp -e addScripts; exitFunction toMain
-    fi
+    _logStamp -e _writeScript
 }
 
-function quickConfig(){
-    apt update 
-    apt install curl -y 
-    apt install net-tools -y 
-    apt install dnsutils -y 
-    apt install vim -y 
-    apt install nano -y 
-    apt install git -y 
-    apt install tmux -y 
-    apt install screenfetch -y 
-    apt install openssh-server -y 
+_quickConfig(){
+    apt update | _log
+    apt install net-tools -y | _log
+    apt install dnsutils -y | _log
+    apt install vim -y | _log
+    apt install nano -y | _log
+    apt install git -y | _log
+    apt install tmux -y | _log
+    apt install screenfetch -y | _log
+    apt install openssh-server -y | _log
+    apt install nginx -y
     echo "--- Pkgs installed ---"
 }
 #==============================================================================================================================================================
@@ -1691,6 +1551,6 @@ function quickConfig(){
 #==============================================================================================================================================================
 
 # - - - - - - - - - - - - - - - - -
-chkSwitches $1 $2 $3 $4 $5 $6
-__main
+_scriptSwitches $*
+_main
 # - - - - - - - - - - - - - - - - -

@@ -1,6 +1,12 @@
 
 # Change Log
 All notable changes to this project will be documented in this file.
+
+## [ Update - August 02, 2020 ]
+
+-   Improved error handling.
+-   Dedicated Log function.
+-   Splunk removed.
  
 ## [ Update - June 09, 2020 ]
   
