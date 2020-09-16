@@ -16,6 +16,8 @@ Sample functions include:
 
 - Wireguard - VPN server and client setup.
 
+  - https://www.youtube.com/watch?v=K609GiqeBEU&t=13s
+
 - SSH - Server install and client key generation.
 
 Instead of having several scripts, simply create a function using the "bonesMalone" function as your guide. Once the function is complete, add an entry to the menu or submenu of your choice so that the option can be presented to the user. This script has samples of making menus using whiptail and dialog.
